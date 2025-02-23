@@ -4,7 +4,7 @@
 
 ## 🤖 What is DerpGPT?
 DerpGPT is a conversational AI model that generates responses based on synthetic persona-chat datasets. It was trained on multi-turn dialogues but often struggles to keep things coherent. Whether it's making up bizarre responses, misunderstanding context, or just plain derping out, DerpGPT is here to entertain.
-You can downlaod him at this link: [https://drive.google.com/file/d/16w5NxYWvVDqfaw9Hrojb1Xcw67ilBViv/view?usp=sharing]
+You can downlaod him from my google drive: https://drive.google.com/file/d/16w5NxYWvVDqfaw9Hrojb1Xcw67ilBViv/view?usp=sharing
 
 ## 🔥 Features
 - **Word-Level Tokenization** – Because subword tokenization would be too smart.
