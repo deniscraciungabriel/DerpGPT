@@ -13,12 +13,12 @@ print("Using device:", device)
 # Hyperparameters for a larger (~50M param) model with word-level tokenization
 batch_size = 32
 block_size = 128  # now refers to a block of words
-max_iters = 10000
+max_iters = 30000
 learning_rate = 3e-5
 eval_iters = 100
-n_embd = 512
-n_head = 8
-n_layer = 8
+n_embd = 1536
+n_head = 24
+n_layer = 24
 dropout = 0.2
 
 # ---------------- Data Loading from JSON ---------------- #
@@ -207,6 +207,10 @@ except FileNotFoundError:
 
 model = model.to(device)
 
+if torch.cuda.device_count() > 1:
+    print("Using", torch.cuda.device_count(), "GPUs")
+    model = nn.DataParallel(model)
+
 @torch.no_grad()
 def estimate_loss():
     out = {}
@@ -222,6 +226,7 @@ def estimate_loss():
     return out
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_iters)
 
 # Ask the user to choose between training or chatting
 mode = input("Choose mode: 'train' or 'chat': ").strip().lower()
@@ -238,6 +243,7 @@ if mode == 'train':
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
+        scheduler.step()
 
     print("Final loss:", loss.item())
 
