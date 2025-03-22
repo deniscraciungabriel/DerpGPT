@@ -12,8 +12,8 @@ device = 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is
 print("Using device:", device)
 
 # Hyperparameters for a larger (~50M param) model with word-level tokenization
-batch_size = 32
-block_size = 128  # now refers to a block of words
+batch_size = 64
+block_size = 128
 max_iters = 30000
 learning_rate = 3e-5
 eval_iters = 100
@@ -194,10 +194,9 @@ except FileNotFoundError:
     print('No saved model found, starting from scratch.')
 
 model = model.to(device)
-
-# if torch.cuda.device_count() > 1:
-#     print("Using", torch.cuda.device_count(), "GPUs")
-#     model = nn.DataParallel(model)
+if torch.cuda.device_count() > 1:
+    print("Using", torch.cuda.device_count(), "GPUs")
+    model = nn.DataParallel(model)
 
 @torch.no_grad()
 def estimate_loss():
