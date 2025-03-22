@@ -194,9 +194,9 @@ except FileNotFoundError:
     print('No saved model found, starting from scratch.')
 
 model = model.to(device)
-# if torch.cuda.device_count() > 1:
-#     print("Using", torch.cuda.device_count(), "GPUs")
-#     model = nn.DataParallel(model)
+if torch.cuda.device_count() > 1:
+    print("Using", torch.cuda.device_count(), "GPUs")
+    model = nn.DataParallel(model)
 
 @torch.no_grad()
 def estimate_loss():
@@ -219,11 +219,36 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_iter
 mode = input("Choose mode: 'train' or 'chat': ").strip().lower()
 
 if mode == 'train':
+    # Automatic loss logging and early stopping setup
+    import csv
+    
+    best_val_loss = float('inf')
+    patience = 5  # number of evals to wait before stopping
+    patience_counter = 0
+    
+    with open("loss_log.csv", mode="w", newline="") as log_file:
+        log_writer = csv.writer(log_file)
+        log_writer.writerow(["step", "train_loss", "val_loss"])
+
     # Training loop
     for iter in range(max_iters):
         if iter % eval_iters == 0:
             losses = estimate_loss()
             print(f"Step: {iter}, train loss: {losses['train']:.3f}, val loss: {losses['val']:.3f}")
+            
+            with open("loss_log.csv", mode="a", newline="") as log_file:
+                log_writer = csv.writer(log_file)
+                log_writer.writerow([iter, losses['train'].item(), losses['val'].item()])
+            
+            # Early stopping logic
+            if losses['val'] < best_val_loss:
+                best_val_loss = losses['val']
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print("Early stopping triggered.")
+                    break
 
         xb, yb = get_batch('train')
         logits, loss = model(xb, yb)
