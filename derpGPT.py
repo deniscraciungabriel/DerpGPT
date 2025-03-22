@@ -207,9 +207,9 @@ except FileNotFoundError:
 
 model = model.to(device)
 
-if torch.cuda.device_count() > 1:
-    print("Using", torch.cuda.device_count(), "GPUs")
-    model = nn.DataParallel(model)
+# if torch.cuda.device_count() > 1:
+#     print("Using", torch.cuda.device_count(), "GPUs")
+#     model = nn.DataParallel(model)
 
 @torch.no_grad()
 def estimate_loss():
