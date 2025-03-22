@@ -194,9 +194,9 @@ except FileNotFoundError:
     print('No saved model found, starting from scratch.')
 
 model = model.to(device)
-if torch.cuda.device_count() > 1:
-    print("Using", torch.cuda.device_count(), "GPUs")
-    model = nn.DataParallel(model)
+# if torch.cuda.device_count() > 1:
+#     print("Using", torch.cuda.device_count(), "GPUs")
+#     model = nn.DataParallel(model)
 
 @torch.no_grad()
 def estimate_loss():
@@ -206,9 +206,8 @@ def estimate_loss():
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split)
-            output = model(X, Y)
-            loss = output[1] if isinstance(output, (tuple, list)) else output
-            losses[k] = loss.mean().mean().item()
+            _, loss = model(X, Y)
+            losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
     return out
@@ -227,8 +226,7 @@ if mode == 'train':
             print(f"Step: {iter}, train loss: {losses['train']:.3f}, val loss: {losses['val']:.3f}")
 
         xb, yb = get_batch('train')
-        output = model(xb, yb)
-        loss = output[1] if isinstance(output, (tuple, list)) else output
+        logits, loss = model(xb, yb)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
