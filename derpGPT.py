@@ -208,7 +208,7 @@ def estimate_loss():
             X, Y = get_batch(split)
             output = model(X, Y)
             loss = output[1] if isinstance(output, (tuple, list)) else output
-            losses[k] = loss.mean().item()
+            losses[k] = loss.mean().mean().item()
         out[split] = losses.mean()
     model.train()
     return out
