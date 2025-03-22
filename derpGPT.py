@@ -52,7 +52,7 @@ val_text = " ".join(all_convos[split_idx:])
 
 # Combine both texts to build a unified vocabulary
 tokenizer = tiktoken.get_encoding("gpt2")
-encode = tokenizer.encode
+encode = lambda s: tokenizer.encode(s, disallowed_special=())
 decode = tokenizer.decode
 vocab_size = tokenizer.n_vocab
 print(f"Vocabulary size: {vocab_size}")
