@@ -3,3 +3,4 @@ tokenizers==0.21.0
 tqdm==4.67.1
 transformers==4.48.3
 pandas==2.2.3
+tiktoken==0.9.0

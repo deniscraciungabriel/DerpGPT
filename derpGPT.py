@@ -5,6 +5,7 @@ import random
 import pickle
 import argparse
 import pandas as pd
+import tiktoken
 
 # Device selection
 device = 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -50,25 +51,12 @@ train_text = " ".join(all_convos[:split_idx])
 val_text = " ".join(all_convos[split_idx:])
 
 # Combine both texts to build a unified vocabulary
-full_text = train_text + " " + val_text
-words = full_text.split()
-vocab = sorted(set(words))
-vocab_size = len(vocab)
+tokenizer = tiktoken.get_encoding("gpt2")
+encode = tokenizer.encode
+decode = tokenizer.decode
+vocab_size = tokenizer.n_vocab
 print(f"Vocabulary size: {vocab_size}")
 
-# Create word-to-index and index-to-word mappings
-word_to_idx = {w: i for i, w in enumerate(vocab)}
-idx_to_word = {i: w for i, w in enumerate(vocab)}
-
-def encode(s):
-    """Encodes a string into a list of integers (word-level)."""
-    return [word_to_idx[w] for w in s.split() if w in word_to_idx]
-
-def decode(vector):
-    """Decodes a list of integers back into a string."""
-    return " ".join(idx_to_word[i] for i in vector)
-
-# Create data tensors from the CSV texts
 training_data = torch.tensor(encode(train_text), dtype=torch.long)
 validation_data = torch.tensor(encode(val_text), dtype=torch.long)
 
