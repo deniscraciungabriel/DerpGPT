@@ -14,7 +14,7 @@ print("Using device:", device)
 # Hyperparameters for a larger (~50M param) model with word-level tokenization
 batch_size = 64
 block_size = 128
-max_iters = 30000
+max_iters = 2000
 learning_rate = 3e-5
 eval_iters = 100
 n_embd = 512
