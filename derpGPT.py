@@ -16,9 +16,9 @@ block_size = 128  # now refers to a block of words
 max_iters = 10000
 learning_rate = 3e-5
 eval_iters = 100
-n_embd = 1536
-n_head = 24
-n_layer = 24
+n_embd = 512
+n_head = 8
+n_layer = 8
 dropout = 0.2
 
 # ---------------- Data Loading from JSON ---------------- #
