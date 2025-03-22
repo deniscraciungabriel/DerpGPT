@@ -16,19 +16,38 @@ block_size = 128  # now refers to a block of words
 max_iters = 10000
 learning_rate = 3e-5
 eval_iters = 100
-n_embd = 512
-n_head = 8
-n_layer = 12
+n_embd = 1536
+n_head = 24
+n_layer = 24
 dropout = 0.2
 
-# ---------------- Data Loading from CSV ---------------- #
-# Load CSV files for training and validation data
-df_train = pd.read_csv("Synthetic-Persona-Chat_train.csv")
-df_val   = pd.read_csv("Synthetic-Persona-Chat_valid.csv")
+# ---------------- Data Loading from JSON ---------------- #
+import json
 
-# Extract conversation text from the correct column
-train_text = " ".join(df_train["Best Generated Conversation"].astype(str).tolist())
-val_text   = " ".join(df_val["Best Generated Conversation"].astype(str).tolist())
+with open("dataset.json", "r", encoding="utf-8") as f:
+    raw_data = json.load(f)
+
+def extract_conversations(convo_list):
+    # Join each turn in the conversation with role tags
+    convo_texts = []
+    for convo in convo_list:
+        chat = convo["conversations"]
+        text = ""
+        for turn in chat:
+            role = turn["from"]
+            value = turn["value"].strip().replace("\n", " ")
+            if role == "human":
+                text += f"User 1: {value}\n"
+            elif role == "gpt":
+                text += f"User 2: {value}\n"
+        convo_texts.append(text.strip())
+    return convo_texts
+
+# Split 90% train, 10% validation
+all_convos = extract_conversations(raw_data)
+split_idx = int(0.9 * len(all_convos))
+train_text = " ".join(all_convos[:split_idx])
+val_text = " ".join(all_convos[split_idx:])
 
 # Combine both texts to build a unified vocabulary
 full_text = train_text + " " + val_text
@@ -250,4 +269,3 @@ elif mode == 'chat':
 
 else:
     print("Invalid mode selected. Please choose 'train' or 'chat'.")
-

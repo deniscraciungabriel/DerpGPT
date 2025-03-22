@@ -1,5 +1,6 @@
 # Ignore model pickle files
 *.pkl
+*.json
 
 # Ignore python venv
 ai/
