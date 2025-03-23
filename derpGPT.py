@@ -240,8 +240,9 @@ class LyricsDataset(IterableDataset):
                             is_val = self.rng.random() < self.val_ratio
                             
                             if (is_val and self.split == 'val') or (not is_val and self.split == 'train'):
-                                x = torch.tensor(buffer[:self.block_size], dtype=torch.long)
-                                y = torch.tensor(buffer[1:self.block_size+1], dtype=torch.long)
+                                # Create tensors with proper dimensions [batch_size=1, sequence_length]
+                                x = torch.tensor(buffer[:self.block_size], dtype=torch.long).unsqueeze(0)
+                                y = torch.tensor(buffer[1:self.block_size+1], dtype=torch.long).unsqueeze(0)
                                 yield x, y
                             
                             # Advance buffer (with overlap for smoother training)
@@ -255,8 +256,9 @@ class LyricsDataset(IterableDataset):
                 if len(buffer) >= self.block_size + 1:
                     is_val = self.rng.random() < self.val_ratio
                     if (is_val and self.split == 'val') or (not is_val and self.split == 'train'):
-                        x = torch.tensor(buffer[:self.block_size], dtype=torch.long)
-                        y = torch.tensor(buffer[1:self.block_size+1], dtype=torch.long)
+                        # Create tensors with proper dimensions [batch_size=1, sequence_length]
+                        x = torch.tensor(buffer[:self.block_size], dtype=torch.long).unsqueeze(0)
+                        y = torch.tensor(buffer[1:self.block_size+1], dtype=torch.long).unsqueeze(0)
                         yield x, y
                     buffer = buffer[self.block_size//2:]
             
@@ -271,8 +273,9 @@ class LyricsDataset(IterableDataset):
             # This allows the training to continue even if there are data loading issues
             logger.warning("Yielding emergency synthetic data")
             for _ in range(10):  # Generate a few emergency samples
-                x = torch.zeros(self.block_size, dtype=torch.long)
-                y = torch.zeros(self.block_size, dtype=torch.long)
+                # Create tensors with proper dimensions [batch_size=1, sequence_length]
+                x = torch.zeros((1, self.block_size), dtype=torch.long)
+                y = torch.zeros((1, self.block_size), dtype=torch.long)
                 yield x, y
 
 # Create data loaders for training and validation
@@ -529,20 +532,30 @@ def train():
         """Safely get next item from iterator with fallback for empty iterators"""
         for attempt in range(max_attempts):
             try:
-                return next(iterator)
+                batch = next(iterator)
+                # Check if we got tensors with correct dimensions (2D - batch × sequence)
+                if isinstance(batch, tuple) and len(batch) == 2:
+                    x, y = batch
+                    # Fix dimension issues - make sure tensors are 2D [batch_size, seq_len]
+                    if x.dim() == 1:
+                        x = x.unsqueeze(0)  # Add batch dimension
+                    if y.dim() == 1:
+                        y = y.unsqueeze(0)  # Add batch dimension
+                    return x, y
+                else:
+                    logger.warning(f"Unexpected batch format on attempt {attempt+1}")
+                    continue
             except StopIteration:
                 logger.warning(f"Iterator exhausted on attempt {attempt+1}, recreating...")
-                if isinstance(iterator, type(train_iter)):
-                    return torch.zeros(args.batch_size, args.block_size, dtype=torch.long), \
-                           torch.zeros(args.batch_size, args.block_size, dtype=torch.long)
-                else:
-                    return torch.zeros(args.batch_size, args.block_size, dtype=torch.long), \
-                           torch.zeros(args.batch_size, args.block_size, dtype=torch.long)
+                if attempt == max_attempts - 1:
+                    # Last attempt, return synthetic data
+                    return torch.zeros((1, args.block_size), dtype=torch.long), \
+                           torch.zeros((1, args.block_size), dtype=torch.long)
         
         # If we've tried multiple times and failed, provide synthetic data
         logger.error("Failed to get data after multiple attempts, using synthetic data")
-        return torch.zeros(args.batch_size, args.block_size, dtype=torch.long), \
-               torch.zeros(args.batch_size, args.block_size, dtype=torch.long)
+        return torch.zeros((1, args.block_size), dtype=torch.long), \
+               torch.zeros((1, args.block_size), dtype=torch.long)
     
     for iter_num in range(start_iter, args.max_iters):
         # Update learning rate according to schedule
@@ -555,7 +568,7 @@ def train():
             # Get data safely
             x, y = safe_next(train_iter)
             
-            if x.size(0) == 0 or y.size(0) == 0:
+            if x.size(0) == 0:
                 logger.warning(f"Empty batch received at iteration {iter_num}, recreating iterator")
                 train_iter = iter(train_loader)
                 x, y = safe_next(train_iter)
@@ -563,19 +576,24 @@ def train():
             # Check tensor shapes and dimensions
             if x.dim() != 2 or y.dim() != 2:
                 logger.warning(f"Unexpected tensor dimensions: x {x.shape}, y {y.shape}")
-                x = x.view(1, -1)[:, :args.block_size]
-                y = y.view(1, -1)[:, :args.block_size]
+                # Reshape tensors to correct dimensions
+                if x.dim() == 1:
+                    x = x.unsqueeze(0)  # Add batch dimension
+                if y.dim() == 1:
+                    y = y.unsqueeze(0)  # Add batch dimension
         
         except Exception as e:
             logger.error(f"Error getting batch at iteration {iter_num}: {str(e)}")
             logger.info("Using synthetic data for this batch")
-            x = torch.zeros(1, args.block_size, dtype=torch.long)
-            y = torch.zeros(1, args.block_size, dtype=torch.long)
+            x = torch.zeros((1, args.block_size), dtype=torch.long)
+            y = torch.zeros((1, args.block_size), dtype=torch.long)
         
         x, y = x.to(device), y.to(device)
         optimizer.zero_grad(set_to_none=True)
         
         try:
+            # Verify tensor shapes before forward pass
+            logger.debug(f"Input tensor shapes: x {x.shape}, y {y.shape}")
             logits, loss = model(x, y)
             
             # Check for NaN or inf values in loss
@@ -603,6 +621,18 @@ def train():
         if iter_num % 100 == 0:
             logger.info(f"Iter {iter_num}: train loss {loss.item()*args.gradient_accumulation_steps:.4f}, lr {lr:.6f}")
             train_losses.append((iter_num, loss.item()*args.gradient_accumulation_steps))
+            
+            # Log some model outputs for a fixed prompt to track progress
+            if iter_num % 1000 == 0:
+                model.eval()
+                with torch.no_grad():
+                    # Generate a short sample to track progress
+                    prompt = "<|lyrics|>\n"
+                    prompt_tokens = torch.tensor(encode(prompt), dtype=torch.long, device=device).unsqueeze(0)
+                    generated = model.generate(prompt_tokens, max_new_tokens=50, temperature=0.8)
+                    generated_text = decode(generated[0].tolist())
+                    logger.info(f"Sample generation at iter {iter_num}:\n{generated_text}")
+                model.train()
         
         # Evaluate on validation set
         if iter_num % args.eval_interval == 0:
@@ -617,8 +647,15 @@ def train():
                 for eval_step in range(args.eval_iters):
                     try:
                         x_val, y_val = safe_next(val_iter)
-                        if x_val.size(0) == 0 or y_val.size(0) == 0:
+                        if x_val.size(0) == 0:
                             continue
+                        
+                        # Ensure correct dimensions
+                        if x_val.dim() == 1:
+                            x_val = x_val.unsqueeze(0)  # Add batch dimension
+                        if y_val.dim() == 1:
+                            y_val = y_val.unsqueeze(0)  # Add batch dimension
+                            
                     except Exception as e:
                         logger.error(f"Error getting validation batch: {str(e)}")
                         continue
