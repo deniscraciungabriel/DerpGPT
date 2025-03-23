@@ -24,15 +24,24 @@ logger = logging.getLogger(__name__)
 
 # Device selection with better error handling
 def get_device():
-    if torch.backends.mps.is_available():
-        return 'mps'
-    elif torch.cuda.is_available():
+    if torch.cuda.is_available():
         return 'cuda'
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        return 'mps'
     else:
         return 'cpu'
 
 device = get_device()
 logger.info(f"Using device: {device}")
+
+# Set up memory handling for safe CSV processing
+# This prevents memory errors when working with large CSVs
+import warnings
+warnings.filterwarnings('ignore', category=pd.errors.DtypeWarning)
+
+# Set pandas options to reduce memory usage
+pd.options.mode.chained_assignment = None  # default='warn'
+
 
 # Parse arguments
 parser = argparse.ArgumentParser(description='Train a language model on song lyrics')
@@ -73,108 +82,154 @@ logger.info(f"Vocabulary size: {vocab_size}")
 
 # Create a streaming dataset for efficient memory usage
 class LyricsDataset(IterableDataset):
-    def __init__(self, file_path, block_size, batch_size):
+    def __init__(self, file_path, block_size, batch_size, split='train', val_ratio=0.05):
         self.file_path = file_path
         self.block_size = block_size
         self.batch_size = batch_size
+        self.split = split
+        self.val_ratio = val_ratio
+        self.buffer = []
+        self.rng = np.random.RandomState(42)  # Fixed seed for reproducibility
         self._estimate_dataset_size()
-        
+    
     def _estimate_dataset_size(self):
         """Estimate dataset size by reading a small sample"""
         try:
-            sample = pd.read_csv(self.file_path, nrows=1000)
-            avg_lyrics_len = sample['lyrics'].str.len().mean()
-            total_rows = sum(1 for _ in open(self.file_path, 'r')) - 1  # Subtract header
-            self.estimated_tokens = int(total_rows * avg_lyrics_len / 4)  # Rough estimate
-            logger.info(f"Estimated dataset size: {self.estimated_tokens} tokens")
+            # Open with low memory footprint
+            sample_size = 100
+            with open(self.file_path, 'r', encoding='utf-8') as f:
+                header = f.readline()  # Read header
+                sample_lines = [f.readline() for _ in range(sample_size)]
+            
+            # Estimate average line length
+            avg_line_len = sum(len(line) for line in sample_lines) / max(1, len(sample_lines))
+            
+            # Count lines more efficiently without loading the file
+            with open(self.file_path, 'r', encoding='utf-8') as f:
+                for line_count, _ in enumerate(f, 1):
+                    if line_count > 1000000:  # Limit counting for very large files
+                        line_count = line_count * 10  # Estimate
+                        break
+            
+            # Estimate tokens (characters / 4 is a rough approximation for English text)
+            est_tokens = int((line_count - 1) * avg_line_len / 4)  # -1 for header
+            logger.info(f"Estimated dataset size: {est_tokens} tokens from {line_count} lines")
+            self.estimated_tokens = est_tokens
+            
         except Exception as e:
             logger.warning(f"Could not estimate dataset size: {str(e)}")
-            self.estimated_tokens = 100000000  # Default estimate
+            self.estimated_tokens = 10000000  # Default conservative estimate
     
-    def process_chunk(self, chunk):
-        """Process a chunk of lyrics data into tokens"""
-        lyrics = chunk['lyrics'].fillna("").astype(str).tolist()
-        # Add some context to help model learn the structure
-        processed_lyrics = []
-        for lyric in lyrics:
-            if len(lyric.strip()) > 0:
-                processed_lyrics.append(f"<|lyrics|>\n{lyric}\n<|endlyrics|>")
+    def process_lyrics(self, lyrics):
+        """Process lyrics text into a formatted string"""
+        if not lyrics or not isinstance(lyrics, str):
+            return ""
         
-        # Join all processed lyrics with newlines
-        all_text = "\n".join(processed_lyrics)
-        return all_text
-    
-    def get_stream(self):
-        """Generator that yields batches of tokens"""
-        buffer = []
-        buffer_size = 0
-        target_buffer_size = self.block_size * self.batch_size * 10  # Target buffer size
-        
-        # Process the CSV in chunks to save memory
-        for chunk in pd.read_csv(self.file_path, chunksize=1000):
-            text = self.process_chunk(chunk)
-            if not text:
-                continue
-                
-            # Encode text to tokens
-            tokens = encode(text)
-            buffer.extend(tokens)
-            buffer_size += len(tokens)
+        lyrics = lyrics.strip()
+        if not lyrics:
+            return ""
             
-            # If buffer is large enough, start yielding batches
-            while len(buffer) >= self.block_size + 1:
-                x = torch.tensor(buffer[:self.block_size], dtype=torch.long)
-                y = torch.tensor(buffer[1:self.block_size+1], dtype=torch.long)
-                yield x, y
-                buffer = buffer[self.block_size:]
-                
-        # Process any remaining tokens in the buffer
-        while len(buffer) >= self.block_size + 1:
-            x = torch.tensor(buffer[:self.block_size], dtype=torch.long)
-            y = torch.tensor(buffer[1:self.block_size+1], dtype=torch.long)
-            yield x, y
-            buffer = buffer[self.block_size:]
+        # Format with special tokens to help model understand structure
+        return f"<|lyrics|>\n{lyrics}\n<|endlyrics|>"
     
     def __iter__(self):
-        return self.get_stream()
+        """Stream through the CSV file and yield batches"""
+        # Set up worker info for parallel processing
+        worker_info = torch.utils.data.get_worker_info()
+        worker_total = worker_info.num_workers if worker_info else 1
+        worker_id = worker_info.id if worker_info else 0
+        
+        # Set up chunk processing
+        chunk_size = 100  # Smaller chunks to reduce memory pressure
+        buffer = self.buffer
+        
+        try:
+            # Process the CSV in chunks with low memory footprint
+            df_iter = pd.read_csv(
+                self.file_path, 
+                chunksize=chunk_size,
+                usecols=['lyrics'],  # Only load the lyrics column
+                dtype={'lyrics': 'str'},
+                error_bad_lines=False,  # Skip problematic lines
+                warn_bad_lines=True,
+                low_memory=True,
+                encoding='utf-8'
+            )
+            
+            for i, chunk in enumerate(df_iter):
+                # Worker partitioning - each worker handles different chunks
+                if i % worker_total != worker_id:
+                    continue
+                
+                # Process lyrics in this chunk
+                for lyrics in chunk['lyrics'].fillna("").values:
+                    # Format the lyrics
+                    formatted_lyrics = self.process_lyrics(lyrics)
+                    if not formatted_lyrics:
+                        continue
+                    
+                    # Add to token buffer
+                    try:
+                        tokens = encode(formatted_lyrics)
+                        buffer.extend(tokens)
+                        
+                        # When buffer is large enough, create training examples
+                        while len(buffer) >= self.block_size + 1:
+                            # Determine if this sample goes to train or val
+                            is_val = self.rng.random() < self.val_ratio
+                            
+                            if (is_val and self.split == 'val') or (not is_val and self.split == 'train'):
+                                x = torch.tensor(buffer[:self.block_size], dtype=torch.long)
+                                y = torch.tensor(buffer[1:self.block_size+1], dtype=torch.long)
+                                yield x, y
+                            
+                            # Advance buffer (with overlap for smoother training)
+                            step_size = max(1, self.block_size // 2)  # 50% overlap for smoother training
+                            buffer = buffer[step_size:]
+                    except Exception as e:
+                        logger.warning(f"Error processing lyrics: {str(e)}")
+                        continue
+        
+        except Exception as e:
+            logger.error(f"Error in dataset iterator: {str(e)}")
+            # If we hit an error, yield any remaining complete sequences
+            while len(buffer) >= self.block_size + 1:
+                is_val = self.rng.random() < self.val_ratio
+                if (is_val and self.split == 'val') or (not is_val and self.split == 'train'):
+                    x = torch.tensor(buffer[:self.block_size], dtype=torch.long)
+                    y = torch.tensor(buffer[1:self.block_size+1], dtype=torch.long)
+                    yield x, y
+                buffer = buffer[self.block_size:]
 
 # Create data loaders for training and validation
 def create_dataloaders(data_path, block_size, batch_size, val_split=0.05):
     """Create data loaders for training and validation"""
-    dataset = LyricsDataset(data_path, block_size, batch_size)
+    # Check if file exists first
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(f"Dataset file not found: {data_path}")
     
-    # Split iterator into train and validation
-    def train_val_split(iterator, val_ratio):
-        for i, item in enumerate(iterator):
-            if np.random.random() < val_ratio:
-                yield (item, 'val')
-            else:
-                yield (item, 'train')
+    logger.info(f"Creating data loaders for {data_path}")
     
-    def train_iter():
-        for item, split in train_val_split(dataset.get_stream(), val_split):
-            if split == 'train':
-                yield item
+    # Create datasets with separate instances
+    train_dataset = LyricsDataset(data_path, block_size, batch_size, split='train', val_ratio=val_split)
+    val_dataset = LyricsDataset(data_path, block_size, batch_size, split='val', val_ratio=val_split)
     
-    def val_iter():
-        for item, split in train_val_split(dataset.get_stream(), val_split):
-            if split == 'val':
-                yield item
-    
+    # Create data loaders
     train_loader = DataLoader(
-        train_iter(), 
-        batch_size=None,  # Iterator already returns batched data
-        num_workers=0,    # Must be 0 for IterableDataset
-        pin_memory=True
+        train_dataset, 
+        batch_size=None,  # Dataset already yields properly sized tensors
+        num_workers=0,    # Start with 0 and increase if stable
+        pin_memory=(device != 'cpu')
     )
     
     val_loader = DataLoader(
-        val_iter(), 
+        val_dataset, 
         batch_size=None,
         num_workers=0,
-        pin_memory=True
+        pin_memory=(device != 'cpu')
     )
     
+    logger.info("Data loaders created successfully")
     return train_loader, val_loader
 
 # Transformer model architecture
@@ -392,6 +447,9 @@ def train():
     
     # Main training loop
     logger.info(f"Starting training from iteration {start_iter}")
+    train_iter = iter(train_loader)
+    val_iter = iter(val_loader)
+    
     for iter_num in range(start_iter, args.max_iters):
         # Update learning rate according to schedule
         lr = get_lr(iter_num)
@@ -402,10 +460,13 @@ def train():
         try:
             x, y = next(train_iter)
         except StopIteration:
+            # Recreate training iterator if exhausted
+            logger.info("Recreating training data iterator...")
             train_iter = iter(train_loader)
             x, y = next(train_iter)
         
         x, y = x.to(device), y.to(device)
+        optimizer.zero_grad(set_to_none=True)
         logits, loss = model(x, y)
         
         # Accumulate gradients and optimize
@@ -427,35 +488,42 @@ def train():
         if iter_num % args.eval_interval == 0:
             model.eval()
             val_loss = 0.0
+            val_samples = 0
+            
+            # Reset validation iterator at the start of validation
+            val_iter = iter(val_loader)
+            
             with torch.no_grad():
-                for _ in range(args.eval_iters):
+                for eval_step in range(args.eval_iters):
                     try:
                         x_val, y_val = next(val_iter)
                     except StopIteration:
-                        val_iter = iter(val_loader)
-                        x_val, y_val = next(val_iter)
+                        # Break if we run out of validation data
+                        logger.info(f"Validation data exhausted after {eval_step} steps")
+                        break
                     
                     x_val, y_val = x_val.to(device), y_val.to(device)
                     _, loss = model(x_val, y_val)
                     val_loss += loss.item()
+                    val_samples += 1
             
-            val_loss /= args.eval_iters
-            val_losses.append((iter_num, val_loss))
-            
-            logger.info(f"Iter {iter_num}: val loss {val_loss:.4f}")
-            
-            # Save model if validation loss improved
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                checkpoint_path = os.path.join(args.checkpoint_dir, f"best_model.pt")
-                torch.save({
-                    'model': model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'iter': iter_num,
-                    'best_val_loss': best_val_loss,
-                    'args': args,
-                }, checkpoint_path)
-                logger.info(f"New best model saved to {checkpoint_path}")
+            if val_samples > 0:
+                val_loss /= val_samples
+                val_losses.append((iter_num, val_loss))
+                logger.info(f"Iter {iter_num}: val loss {val_loss:.4f}")
+                
+                # Save model if validation loss improved
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    checkpoint_path = os.path.join(args.checkpoint_dir, f"best_model.pt")
+                    torch.save({
+                        'model': model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'iter': iter_num,
+                        'best_val_loss': best_val_loss,
+                        'args': args,
+                    }, checkpoint_path)
+                    logger.info(f"New best model saved to {checkpoint_path}")
             
             model.train()
         
@@ -558,10 +626,67 @@ def chat():
         all_tokens = torch.cat([context, torch.tensor([exchange_tokens], dtype=torch.long, device=device)], dim=1)
         context = all_tokens[:, -1024:] if all_tokens.size(1) > 1024 else all_tokens
 
+# Add a simple batch test function to verify data loading works
+def test_batch():
+    """Test function to verify data loading without starting full training"""
+    logger.info("Testing batch loading...")
+    
+    try:
+        # Create data loaders with small block size for quick testing
+        test_block_size = 64
+        test_batch_size = 4
+        train_loader, val_loader = create_dataloaders(
+            args.data_path, 
+            block_size=test_block_size, 
+            batch_size=test_batch_size
+        )
+        
+        # Try to get a few batches
+        logger.info("Testing training data loader...")
+        train_iter = iter(train_loader)
+        
+        for i in range(3):
+            try:
+                x, y = next(train_iter)
+                logger.info(f"Training batch {i+1}: x shape {x.shape}, y shape {y.shape}")
+            except StopIteration:
+                logger.info(f"Training iterator exhausted after {i} batches")
+                break
+        
+        logger.info("Testing validation data loader...")
+        val_iter = iter(val_loader)
+        
+        for i in range(3):
+            try:
+                x, y = next(val_iter)
+                logger.info(f"Validation batch {i+1}: x shape {x.shape}, y shape {y.shape}")
+            except StopIteration:
+                logger.info(f"Validation iterator exhausted after {i} batches")
+                break
+                
+        logger.info("Batch loading test completed successfully!")
+        return True
+    
+    except Exception as e:
+        logger.error(f"Batch loading test failed: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
+
 if __name__ == "__main__":
-    if args.mode == 'train':
-        train()
-    elif args.mode == 'chat':
-        chat()
-    else:
-        logger.error(f"Unknown mode: {args.mode}")
+    try:
+        if args.mode == 'train':
+            if test_batch():  # Verify data loading works first
+                train()
+            else:
+                logger.error("Training aborted due to data loading issues")
+        elif args.mode == 'chat':
+            chat()
+        elif args.mode == 'test':
+            test_batch()
+        else:
+            logger.error(f"Unknown mode: {args.mode}")
+    except Exception as e:
+        logger.error(f"Fatal error: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
