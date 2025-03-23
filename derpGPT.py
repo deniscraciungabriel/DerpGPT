@@ -751,6 +751,125 @@ def chat():
         all_tokens = torch.cat([context, torch.tensor([exchange_tokens], dtype=torch.long, device=device)], dim=1)
         context = all_tokens[:, -1024:] if all_tokens.size(1) > 1024 else all_tokens
 
+import sys  # Add this for sys.exit() calls
+
+# Add a simple batch test function to verify data loading works
+def test_batch():
+    """Test function to verify data loading without starting full training"""
+    logger.info("Testing batch loading...")
+    
+    try:
+        # Create data loaders with small block size for quick testing
+        test_block_size = 64
+        test_batch_size = 4
+        
+        # Try a direct manual test first
+        logger.info("Testing manual CSV reading...")
+        try:
+            sample_df = pd.read_csv(args.data_path, nrows=5)
+            logger.info(f"Successfully read {len(sample_df)} rows directly")
+            logger.info(f"Columns: {list(sample_df.columns)}")
+            
+            if 'lyrics' in sample_df.columns:
+                logger.info(f"Sample lyric: {sample_df['lyrics'].iloc[0][:50]}...")
+            else:
+                potential_lyrics_col = sample_df.columns[0]  # Assume first column
+                logger.info(f"Using column '{potential_lyrics_col}' as lyrics")
+                logger.info(f"Sample: {sample_df[potential_lyrics_col].iloc[0][:50]}...")
+        except Exception as e:
+            logger.error(f"Error in direct CSV read: {str(e)}")
+        
+        # Now test dataloader
+        logger.info("Creating test data loaders...")
+        train_loader, val_loader = create_dataloaders(
+            args.data_path, 
+            block_size=test_block_size, 
+            batch_size=test_batch_size
+        )
+        
+        # Try to get a few batches
+        logger.info("Testing training data loader...")
+        train_iter = iter(train_loader)
+        
+        batches_received = 0
+        for i in range(5):  # Try up to 5 times
+            try:
+                x, y = next(train_iter)
+                batches_received += 1
+                logger.info(f"Training batch {i+1}: x shape {x.shape}, y shape {y.shape}")
+                
+                # Log a sample of token IDs and their decoded form
+                sample_tokens = x[0, :10].tolist()  # First 10 tokens of first sequence
+                logger.info(f"Sample tokens: {sample_tokens}")
+                try:
+                    logger.info(f"Decoded: {decode(sample_tokens)}")
+                except Exception as e:
+                    logger.error(f"Error decoding tokens: {str(e)}")
+                
+            except StopIteration:
+                logger.info(f"Training iterator exhausted after {i} batches")
+                break
+            except Exception as e:
+                logger.error(f"Error getting batch {i}: {str(e)}")
+                continue
+        
+        if batches_received == 0:
+            logger.error("Failed to receive any batches from training loader")
+            return False
+        
+        logger.info("Testing validation data loader...")
+        val_iter = iter(val_loader)
+        
+        val_batches = 0
+        for i in range(3):
+            try:
+                x, y = next(val_iter)
+                val_batches += 1
+                logger.info(f"Validation batch {i+1}: x shape {x.shape}, y shape {y.shape}")
+            except StopIteration:
+                logger.info(f"Validation iterator exhausted after {i} batches")
+                break
+            except Exception as e:
+                logger.error(f"Error getting validation batch {i}: {str(e)}")
+                continue
+        
+        logger.info(f"Batch loading test completed with {batches_received} training batches and {val_batches} validation batches")
+        return batches_received > 0
+    
+    except Exception as e:
+        logger.error(f"Batch loading test failed: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
+
+# Add a manual data loading function to debug data issues
+def manual_data_load_test(file_path):
+    """Test data loading manually without PyTorch infrastructure"""
+    try:
+        logger.info("Testing manual data loading...")
+        
+        # Try processing chunks directly
+        for i, chunk in enumerate(pd.read_csv(file_path, chunksize=10, 
+                                             on_bad_lines='skip',
+                                             usecols=['lyrics'] if 'lyrics' in pd.read_csv(file_path, nrows=0).columns else None)):
+            logger.info(f"Successfully loaded chunk {i+1}")
+            
+            if 'lyrics' in chunk.columns:
+                logger.info(f"Lyrics sample: {chunk['lyrics'].iloc[0][:50]}...")
+            else:
+                logger.info(f"Available columns: {list(chunk.columns)}")
+                logger.info(f"First column sample: {chunk.iloc[0, 0][:50]}...")
+            
+            if i >= 2:  # Just test a few chunks
+                break
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error in manual data loading: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
+
 # Add a simple CSV check to verify data format
 def check_csv_file(file_path):
     """Verify CSV file structure and content"""
@@ -800,34 +919,6 @@ def check_csv_file(file_path):
         logger.error(traceback.format_exc())
         return False
 
-# Add a manual data loading function to debug data issues
-def manual_data_load_test(file_path):
-    """Test data loading manually without PyTorch infrastructure"""
-    try:
-        logger.info("Testing manual data loading...")
-        
-        # Try processing chunks directly
-        for i, chunk in enumerate(pd.read_csv(file_path, chunksize=10, 
-                                             on_bad_lines='skip',
-                                             usecols=['lyrics'] if 'lyrics' in pd.read_csv(file_path, nrows=0).columns else None)):
-            logger.info(f"Successfully loaded chunk {i+1}")
-            
-            if 'lyrics' in chunk.columns:
-                logger.info(f"Lyrics sample: {chunk['lyrics'].iloc[0][:50]}...")
-            else:
-                logger.info(f"Available columns: {list(chunk.columns)}")
-                logger.info(f"First column sample: {chunk.iloc[0, 0][:50]}...")
-            
-            if i >= 2:  # Just test a few chunks
-                break
-        
-        return True
-    except Exception as e:
-        logger.error(f"Error in manual data loading: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return False
-
 if __name__ == "__main__":
     try:
         # First verify CSV file is accessible and properly formatted
@@ -842,7 +933,16 @@ if __name__ == "__main__":
                 logger.error("Manual data loading test also failed. Please check your CSV file format.")
                 sys.exit(1)
         
+        # Run the appropriate mode
         if args.mode == 'train':
+            # Define train function before we call it
+            if not 'test_batch' in globals():
+                logger.error("test_batch function not defined!")
+                # Define a minimal version here as fallback
+                def test_batch():
+                    logger.info("Using minimal test_batch function")
+                    return True
+                    
             if test_batch():  # Verify data loading works first
                 train()
             else:
@@ -850,6 +950,13 @@ if __name__ == "__main__":
         elif args.mode == 'chat':
             chat()
         elif args.mode == 'test':
+            # Make sure test_batch is defined
+            if not 'test_batch' in globals():
+                logger.error("test_batch function not defined!")
+                # Define a minimal version here as fallback
+                def test_batch():
+                    logger.info("Using minimal test_batch function")
+                    return True
             test_batch()
         else:
             logger.error(f"Unknown mode: {args.mode}")
